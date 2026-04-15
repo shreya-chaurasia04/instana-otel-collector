@@ -1,0 +1,253 @@
+# RBAC Configuration for Target Allocator
+# This file contains the necessary Kubernetes RBAC permissions for the target allocator
+# to discover and manage Prometheus scrape targets.
+
+---
+# ServiceAccount for Target Allocator
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idot-targetallocator
+  namespace: instana-collector
+  labels:
+    app.kubernetes.io/name: idot-targetallocator
+    app.kubernetes.io/component: target-allocator
+
+---
+# ClusterRole with permissions for target discovery
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idot-targetallocator
+  labels:
+    app.kubernetes.io/name: idot-targetallocator
+    app.kubernetes.io/component: target-allocator
+rules:
+  # Required for ServiceMonitor and PodMonitor discovery
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+      - podmonitors
+    verbs: ["get", "list", "watch"]
+  
+  # Required for service discovery and endpoint resolution
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  
+  # Required for node discovery (for node-level metrics)
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get", "list", "watch"]
+  
+  # Required for namespace discovery
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  
+  # Required for ConfigMap-based configuration (optional)
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs: ["get", "list", "watch"]
+  
+  # Required for Ingress discovery (if scraping ingress metrics)
+  - apiGroups: ["networking.k8s.io", "extensions"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding to bind the ClusterRole to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idot-targetallocator
+  labels:
+    app.kubernetes.io/name: idot-targetallocator
+    app.kubernetes.io/component: target-allocator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idot-targetallocator
+subjects:
+  - kind: ServiceAccount
+    name: idot-targetallocator
+    namespace: instana-collector
+
+---
+# Optional: Role for namespace-scoped operations
+# Use this if you want to limit target allocator to specific namespaces
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: Role
+# metadata:
+#   name: idot-targetallocator
+#   namespace: my-app-namespace
+# rules:
+#   - apiGroups: [""]
+#     resources:
+#       - services
+#       - endpoints
+#       - pods
+#     verbs: ["get", "list", "watch"]
+#   - apiGroups: ["monitoring.coreos.com"]
+#     resources:
+#       - servicemonitors
+#       - podmonitors
+#     verbs: ["get", "list", "watch"]
+
+---
+# Optional: RoleBinding for namespace-scoped permissions
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: idot-targetallocator
+#   namespace: my-app-namespace
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: idot-targetallocator
+# subjects:
+#   - kind: ServiceAccount
+#     name: idot-targetallocator
+#     namespace: instana-collector
+
+---
+# RBAC for OpenTelemetry Collectors to query Target Allocator
+# The collectors need to be able to query the target allocator service
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idot-collector-targetallocator-client
+  labels:
+    app.kubernetes.io/name: idot-collector
+    app.kubernetes.io/component: opentelemetry-collector
+rules:
+  # Collectors need to query the target allocator service
+  - apiGroups: [""]
+    resources:
+      - services
+    verbs: ["get"]
+    resourceNames:
+      - idot-targetallocator
+
+---
+# ClusterRoleBinding for collector access to target allocator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idot-collector-targetallocator-client
+  labels:
+    app.kubernetes.io/name: idot-collector
+    app.kubernetes.io/component: opentelemetry-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idot-collector-targetallocator-client
+subjects:
+  # DaemonSet collector service account
+  - kind: ServiceAccount
+    name: idot-daemonset-opentelemetry-collector
+    namespace: instana-collector
+  # StatefulSet collector service account
+  - kind: ServiceAccount
+    name: idot-statefulset-opentelemetry-collector
+    namespace: instana-collector
+
+---
+# NetworkPolicy to allow collectors to communicate with target allocator
+# This is optional but recommended for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: idot-targetallocator
+  namespace: instana-collector
+  labels:
+    app.kubernetes.io/name: idot-targetallocator
+    app.kubernetes.io/component: target-allocator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: target-allocator
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow traffic from collectors
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: opentelemetry-collector
+      ports:
+        - protocol: TCP
+          port: 80
+    # Allow traffic from monitoring/debugging tools (optional)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: instana-collector
+      ports:
+        - protocol: TCP
+          port: 80
+
+---
+# PodSecurityPolicy for Target Allocator (if PSP is enabled in cluster)
+# Note: PSP is deprecated in Kubernetes 1.25+, use Pod Security Standards instead
+# apiVersion: policy/v1beta1
+# kind: PodSecurityPolicy
+# metadata:
+#   name: idot-targetallocator
+#   labels:
+#     app.kubernetes.io/name: idot-targetallocator
+#     app.kubernetes.io/component: target-allocator
+# spec:
+#   privileged: false
+#   allowPrivilegeEscalation: false
+#   requiredDropCapabilities:
+#     - ALL
+#   volumes:
+#     - 'configMap'
+#     - 'emptyDir'
+#     - 'projected'
+#     - 'secret'
+#     - 'downwardAPI'
+#   hostNetwork: false
+#   hostIPC: false
+#   hostPID: false
+#   runAsUser:
+#     rule: 'MustRunAsNonRoot'
+#   seLinux:
+#     rule: 'RunAsAny'
+#   supplementalGroups:
+#     rule: 'RunAsAny'
+#   fsGroup:
+#     rule: 'RunAsAny'
+#   readOnlyRootFilesystem: false
+
+---
+# Usage Instructions:
+# 
+# 1. Apply this RBAC configuration before installing the Helm chart:
+#    kubectl apply -f target-allocator-rbac.yaml
+#
+# 2. The Helm chart should automatically use these service accounts
+#    If not, you can specify them in values.yaml:
+#    
+#    targetAllocator:
+#      serviceAccount:
+#        create: false
+#        name: idot-targetallocator
+#
+# 3. Verify RBAC permissions:
+#    kubectl auth can-i list servicemonitors --as=system:serviceaccount:instana-collector:idot-targetallocator
+#    kubectl auth can-i list pods --as=system:serviceaccount:instana-collector:idot-targetallocator
+#
+# 4. Troubleshoot RBAC issues:
+#    kubectl logs -l app.kubernetes.io/component=target-allocator -n instana-collector
+#    # Look for "forbidden" or "unauthorized" errors
+
+# Made with Bob

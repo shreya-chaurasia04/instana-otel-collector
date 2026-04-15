@@ -49,6 +49,41 @@
 # | clusterMetrics       | No        | Yes         | Collect cluster-wide resource metrics |
 
 # ------------------------------------------------------------------------------
+# Target Allocator Configuration
+# ------------------------------------------------------------------------------
+# The Target Allocator is used to distribute Prometheus scrape targets across
+# multiple collector instances for horizontal scaling of metric collection.
+# It uses consistent hashing to ensure targets are evenly distributed and
+# minimize reassignment when collectors scale up or down.
+targetAllocator:
+  enabled: false  # Set to true to enable target allocator
+  image:
+    repository: ghcr.io/open-telemetry/opentelemetry-operator/target-allocator
+    tag: 0.95.0
+  replicas: 1
+  # Allocation strategy - consistent-hashing ensures minimal target reassignment
+  allocationStrategy: consistent-hashing
+  # Service configuration for target allocator
+  service:
+    type: ClusterIP
+    port: 80
+  # Prometheus configuration for service discovery
+  prometheusCR:
+    enabled: true  # Enable Prometheus CR-based service discovery
+    # ServiceMonitor selector - targets to scrape
+    serviceMonitorSelector: {}
+    # PodMonitor selector
+    podMonitorSelector: {}
+  # Resource limits for target allocator
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# ------------------------------------------------------------------------------
 # DaemonSet — runs on every node to collect node/pod metrics & logs
 # ------------------------------------------------------------------------------
 daemonset:
@@ -159,6 +194,18 @@ daemonset:
               - set(resource.attributes["INSTANA_PLUGIN"], "k8s") where resource.attributes["k8s.cluster.uid"] != nil and resource.attributes["entity.type"] != "otel-collector"
               - set(resource.attributes["service.name"], resource.attributes["k8s.cluster.name"]) where resource.attributes["entity.type"] == "otel-collector"
     receivers:
+      # Prometheus receiver with target allocator support
+      # Uncomment and configure when target allocator is enabled
+      # prometheus:
+      #   config:
+      #     global:
+      #       scrape_interval: 30s
+      #       scrape_timeout: 10s
+      #   # Target allocator configuration - distributes scrape targets using consistent hashing
+      #   target_allocator:
+      #     endpoint: http://idot-targetallocator:80
+      #     interval: 30s
+      #     collector_id: ${POD_NAME}
       hostmetrics:
         collection_interval: 30s
       kubeletstats:

@@ -189,6 +189,22 @@ See the table below for links to supported components
 | Extensions    | [Extensions List](https://github.com/instana/instana-otel-collector/blob/main/docs/extensions.md)  |
 | Providers     | [Provider List](https://github.com/instana/instana-otel-collector/blob/main/docs/providers.md)      |
 
+## Feature to be added
+
+### Target Allocator with Consistent Hashing
+
+The Target Allocator enables horizontal scaling of Prometheus metric collection by distributing scrape targets across multiple collector instances using consistent hashing. This ensures:
+
+- Even distribution of scrape targets
+- Minimal reassignment when scaling collectors
+- High availability for metric collection
+
+**Documentation:**
+- [Target Allocator Guide](docs/target-allocator.md) - Complete documentation
+- [Quick Start Guide](examples/target-allocator-quickstart.md) - Get started in 5 minutes
+- [Example Configuration](examples/target-allocator-example.yaml) - Full configuration example
+- [RBAC Configuration](examples/target-allocator-rbac.yaml) - Required permissions
+
 ## OpAmp Support
 
 Coming soon...
