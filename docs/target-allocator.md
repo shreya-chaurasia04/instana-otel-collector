@@ -1,171 +1,83 @@
-# Target Allocator with Consistent Hashing Strategy
+# Target Allocator Support
 
 ## Overview
 
-The Target Allocator is a component that enables horizontal scaling of Prometheus metric collection in OpenTelemetry Collector deployments. It distributes Prometheus scrape targets across multiple collector instances using a consistent hashing strategy, ensuring:
+IDOT already includes support for the Prometheus receiver in the collector binary. This document explains how Target Allocator can be used together with Prometheus-based scraping in Kubernetes environments.
 
-- **Even distribution** of scrape targets across collectors
-- **Minimal reassignment** when collectors scale up or down
-- **High availability** for metric collection
-- **Efficient resource utilization**
+In this chart, IDOT deploys both:
+- a DaemonSet for node-local collection such as `hostmetrics` and `kubeletstats`
+- a StatefulSet for centralized cluster-level collection
+
+If Target Allocator support is added for this chart, the recommended pattern is to configure Prometheus scraping on the StatefulSet tier rather than the DaemonSet tier.
+
+## What This Document Covers
+
+This document is intentionally focused on:
+- how Target Allocator relates to Prometheus scraping
+- where Prometheus receiver configuration would belong in IDOT
+- what additional Kubernetes discovery resources are typically required
+
+This document does not claim that the non-operator IDOT Helm chart currently creates all required Target Allocator resources automatically.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                        │
-│                                                              │
-│  ┌──────────────────┐         ┌─────────────────────┐      │
-│  │ ServiceMonitors  │────────▶│  Target Allocator   │      │
-│  │  & PodMonitors   │         │ (Consistent Hashing)│      │
-│  └──────────────────┘         └──────────┬──────────┘      │
-│                                           │                  │
-│                          ┌────────────────┼────────────┐    │
-│                          │                │            │    │
-│                          ▼                ▼            ▼    │
-│                   ┌──────────┐    ┌──────────┐  ┌──────────┐
-│                   │Collector │    │Collector │  │Collector │
-│                   │ Pod 1    │    │ Pod 2    │  │ Pod 3    │
-│                   └────┬─────┘    └────┬─────┘  └────┬─────┘
-│                        │               │             │       │
-│                        └───────────────┴─────────────┘       │
-│                                    │                          │
-│                                    ▼                          │
-│                            ┌──────────────┐                  │
-│                            │   Instana    │                  │
-│                            │   Backend    │                  │
-│                            └──────────────┘                  │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌───────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                    │
+│                                                          │
+│  ServiceMonitor / PodMonitor resources                   │
+│                    │                                     │
+│                    ▼                                     │
+│           Target Allocator service                       │
+│                    │                                     │
+│                    ▼                                     │
+│         StatefulSet collector replicas                   │
+│         with Prometheus receiver enabled                 │
+│                    │                                     │
+│                    ▼                                     │
+│               Instana backend                            │
+└───────────────────────────────────────────────────────────┘
 ```
 
-## How Consistent Hashing Works
+## How Consistent Hashing Helps
 
-Consistent hashing ensures that:
-1. Each scrape target is assigned to exactly one collector instance
-2. When a collector is added or removed, only a minimal number of targets are reassigned
-3. Targets are evenly distributed across all available collectors
+Consistent hashing is useful for Prometheus scrape target distribution because it helps:
+1. assign each scrape target to a single collector replica
+2. minimize reassignment when collector replicas scale up or down
+3. keep target distribution relatively stable over time
 
-### Benefits over other strategies:
-- **least-weighted**: Distributes based on load, but can cause more reassignments
-- **per-node**: Ties targets to specific nodes, less flexible for scaling
-- **consistent-hashing**: Optimal for dynamic scaling with minimal disruption
+## Recommended Placement in IDOT
 
-## Configuration
-
-In this IDOT chart, both a DaemonSet and a StatefulSet collector are deployed. For target allocation, the recommended pattern is:
+For this chart:
 - use the DaemonSet for node-local collection such as `hostmetrics` and `kubeletstats`
-- use the StatefulSet as the centralized scalable Prometheus scraping tier with target allocator
+- use the StatefulSet for Prometheus scraping if Target Allocator is introduced
 
-### Step 1: Enable Target Allocator in values.yaml
+## Example Overlay
 
+Use the additive example in [`examples/target-allocator-example.yaml`](../examples/target-allocator-example.yaml). It only shows the incremental configuration needed to:
+- enable Prometheus scraping on the StatefulSet collector
+- add the Prometheus receiver to the metrics pipeline
+- point the Prometheus receiver to a Target Allocator service endpoint
+
+## How the Target Allocator Endpoint Is Determined
+
+The Target Allocator endpoint is based on the Kubernetes Service created for the Target Allocator deployment.
+
+Example:
 ```yaml
-targetAllocator:
-  enabled: true  # Enable target allocator
-  image:
-    repository: ghcr.io/open-telemetry/opentelemetry-operator/target-allocator
-    tag: 0.95.0
-  replicas: 1
-  # Use consistent-hashing strategy for optimal distribution
-  allocationStrategy: consistent-hashing
-  service:
-    type: ClusterIP
-    port: 80
-  # Enable Prometheus CR-based service discovery
-  prometheusCR:
-    enabled: true
-    # Select which ServiceMonitors to use (empty = all)
-    serviceMonitorSelector: {}
-    # Select which PodMonitors to use (empty = all)
-    podMonitorSelector: {}
-  resources:
-    limits:
-      cpu: 200m
-      memory: 256Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
+target_allocator:
+  endpoint: http://<target-allocator-service-name>:80
 ```
 
-### Step 2: Configure Prometheus Receiver in the StatefulSet
+Replace `<target-allocator-service-name>` with the actual service name in your cluster. This repository currently does not create that service in the non-operator chart, so the exact endpoint depends on how Target Allocator is deployed in your environment.
 
-Enable the Prometheus receiver on the `statefulset` collector:
+## Prometheus Discovery Requirements
 
-```yaml
-statefulset:
-  replicaCount: 3
-  config:
-    receivers:
-      prometheus:
-        config:
-          global:
-            scrape_interval: 30s
-            scrape_timeout: 10s
-        # Connect to target allocator
-        target_allocator:
-          endpoint: http://idot-targetallocator:80
-          interval: 30s
-          collector_id: ${POD_NAME}
-```
+Target Allocator becomes useful when Prometheus scrape targets are discovered dynamically. In Kubernetes, this is commonly done using resources such as:
+- `ServiceMonitor`
+- `PodMonitor`
 
-### Step 3: Add Prometheus Receiver to the StatefulSet Metrics Pipeline
-
-```yaml
-statefulset:
-  config:
-    service:
-      pipelines:
-        metrics:
-          receivers:
-          - otlp
-          - k8s_cluster
-          - prometheus
-          exporters:
-          - otlp/instana
-          processors:
-          - resourcedetection/env
-          - k8sattributes
-          - memory_limiter
-          - batch
-```
-
-### Step 4: Scale Collectors for Load Distribution
-
-To benefit from target allocation, scale your collector deployment:
-
-```bash
-# For StatefulSet collectors
-kubectl scale statefulset idot-statefulset --replicas=3 -n instana-collector
-
-# For DaemonSet, collectors automatically scale with nodes
-```
-
-## RBAC Configuration
-
-The target allocator requires permissions to discover ServiceMonitors and PodMonitors:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: idot-targetallocator
-rules:
-  # Required for ServiceMonitor discovery
-  - apiGroups: ["monitoring.coreos.com"]
-    resources: ["servicemonitors", "podmonitors"]
-    verbs: ["get", "list", "watch"]
-  # Required for service discovery
-  - apiGroups: [""]
-    resources: ["services", "endpoints", "pods"]
-    verbs: ["get", "list", "watch"]
-  # Required for node discovery
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-```
-
-## Example: Scraping Application Metrics
-
-### 1. Create a ServiceMonitor
+Example ServiceMonitor:
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1
@@ -178,275 +90,55 @@ spec:
     matchLabels:
       app: my-application
   endpoints:
-  - port: metrics
-    interval: 30s
-    path: /metrics
+    - port: metrics
+      path: /metrics
+      interval: 30s
 ```
 
-### 2. Deploy Your Application with Metrics Endpoint
+## RBAC Notes
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: my-application
-  labels:
-    app: my-application
-spec:
-  ports:
-  - name: metrics
-    port: 8080
-    targetPort: 8080
-  selector:
-    app: my-application
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: my-application
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: my-application
-  template:
-    metadata:
-      labels:
-        app: my-application
-    spec:
-      containers:
-      - name: app
-        image: my-app:latest
-        ports:
-        - containerPort: 8080
-          name: metrics
-```
+RBAC requirements depend on how Target Allocator is deployed.
 
-### 3. Verify Target Allocation
+If Target Allocator is managed by an upstream chart or by the OpenTelemetry Operator, some RBAC resources may already be created for you. Before adding custom RBAC, check what is already generated by the deployment mechanism you are using.
 
-Check the target allocator to see how targets are distributed:
+At a minimum, Prometheus CRD-based discovery usually requires access to resources such as:
+- `servicemonitors`
+- `podmonitors`
+- `services`
+- `endpoints`
+- `pods`
+
+## Installation Example
+
+If you are using an overlay file:
 
 ```bash
-# Port-forward to target allocator
-kubectl port-forward svc/idot-targetallocator 8080:80 -n instana-collector
+helm install instana-otel-collector \
+  --repo https://instana.github.io/instana-otel-collector instana-otel-collector-chart \
+  --namespace instana-collector \
+  --create-namespace \
+  -f examples/target-allocator-example.yaml
+```
 
-# View allocated targets
+## Validation Scenario
+
+A simple way to validate the setup is:
+1. deploy collector replicas in the StatefulSet
+2. create a `ServiceMonitor` for a test workload
+3. verify that the Target Allocator exposes discovered jobs
+4. verify that Prometheus targets are distributed across collector replicas
+
+Example commands:
+
+```bash
+kubectl get pods -n instana-collector
+kubectl get servicemonitors -A
+kubectl port-forward svc/<target-allocator-service-name> 8080:80 -n instana-collector
 curl http://localhost:8080/jobs
-
-# View targets for a specific collector
-curl http://localhost:8080/jobs/<job-name>/targets?collector_id=<pod-name>
 ```
-
-## Installation with Helm
-
-### Basic Installation with Target Allocator
-
-```bash
-helm install instana-otel-collector \
-  --repo https://instana.github.io/instana-otel-collector instana-otel-collector-chart \
-  --namespace instana-collector \
-  --create-namespace \
-  --set clusterName=my-cluster \
-  --set instanaEndpoint=ingress-red-saas.instana.io:443 \
-  --set instanaKey=<YOUR_INSTANA_KEY> \
-  --set targetAllocator.enabled=true \
-  --set targetAllocator.allocationStrategy=consistent-hashing
-```
-
-### Installation with Custom Values File
-
-Create a `custom-values.yaml`:
-
-```yaml
-clusterName: my-cluster
-instanaEndpoint: ingress-red-saas.instana.io:443
-instanaKey: <YOUR_INSTANA_KEY>
-
-targetAllocator:
-  enabled: true
-  allocationStrategy: consistent-hashing
-  replicas: 1
-  prometheusCR:
-    enabled: true
-    serviceMonitorSelector:
-      matchLabels:
-        monitoring: enabled
-
-statefulset:
-  replicaCount: 3
-  config:
-    receivers:
-      prometheus:
-        config:
-          global:
-            scrape_interval: 30s
-        target_allocator:
-          endpoint: http://idot-targetallocator:80
-          interval: 30s
-          collector_id: ${POD_NAME}
-    service:
-      pipelines:
-        metrics:
-          receivers:
-          - otlp
-          - k8s_cluster
-          - prometheus
-```
-
-Install with custom values:
-
-```bash
-helm install instana-otel-collector \
-  --repo https://instana.github.io/instana-otel-collector instana-otel-collector-chart \
-  --namespace instana-collector \
-  --create-namespace \
-  -f custom-values.yaml
-```
-
-## Monitoring and Troubleshooting
-
-### Check Target Allocator Status
-
-```bash
-# View target allocator logs
-kubectl logs -l app.kubernetes.io/component=target-allocator -n instana-collector
-
-# Check target allocator service
-kubectl get svc idot-targetallocator -n instana-collector
-
-# Describe target allocator pod
-kubectl describe pod -l app.kubernetes.io/component=target-allocator -n instana-collector
-```
-
-### Verify Prometheus Receiver Configuration
-
-```bash
-# Check collector logs for Prometheus receiver
-kubectl logs -l app.kubernetes.io/component=opentelemetry-collector -n instana-collector | grep prometheus
-
-# Check if targets are being scraped
-kubectl logs -l app.kubernetes.io/component=opentelemetry-collector -n instana-collector | grep "scrape"
-```
-
-### Common Issues
-
-#### 1. No Targets Discovered
-
-**Symptom**: Target allocator shows no targets
-
-**Solution**:
-- Verify ServiceMonitors/PodMonitors exist: `kubectl get servicemonitors -A`
-- Check selector configuration in `prometheusCR.serviceMonitorSelector`
-- Verify RBAC permissions for target allocator
-
-#### 2. Targets Not Distributed
-
-**Symptom**: All targets assigned to one collector
-
-**Solution**:
-- Ensure multiple collector replicas are running
-- Verify `collector_id` is set correctly (should be `${POD_NAME}`)
-- Check target allocator logs for allocation errors
-
-#### 3. High Memory Usage
-
-**Symptom**: Target allocator consuming excessive memory
-
-**Solution**:
-- Reduce number of ServiceMonitors/PodMonitors
-- Increase resource limits
-- Consider filtering targets with more specific selectors
-
-## Performance Considerations
-
-### Scaling Guidelines
-
-| Scrape Targets | Recommended Collectors | Target Allocator Replicas |
-|----------------|------------------------|---------------------------|
-| < 100          | 1-2                    | 1                         |
-| 100-500        | 2-5                    | 1                         |
-| 500-1000       | 5-10                   | 1-2                       |
-| > 1000         | 10+                    | 2-3                       |
-
-### Resource Requirements
-
-**Target Allocator**:
-- CPU: ~50m per 1000 targets
-- Memory: ~100Mi per 1000 targets
-
-**Collector (with Prometheus receiver)**:
-- CPU: ~100m per 100 targets
-- Memory: ~200Mi per 100 targets
-
-## Advanced Configuration
-
-### Custom Allocation Strategy
-
-While consistent-hashing is recommended, you can use other strategies:
-
-```yaml
-targetAllocator:
-  allocationStrategy: least-weighted  # Alternative strategy
-```
-
-Available strategies:
-- `consistent-hashing`: Best for dynamic scaling (recommended)
-- `least-weighted`: Distributes based on current load
-- `per-node`: Assigns targets based on node affinity
-
-### Filtering Targets
-
-Use label selectors to control which ServiceMonitors are used:
-
-```yaml
-targetAllocator:
-  prometheusCR:
-    serviceMonitorSelector:
-      matchLabels:
-        team: platform
-        environment: production
-    podMonitorSelector:
-      matchExpressions:
-      - key: monitoring
-        operator: In
-        values: [enabled, required]
-```
-
-### High Availability Setup
-
-For production environments, run multiple target allocator replicas:
-
-```yaml
-targetAllocator:
-  enabled: true
-  replicas: 3  # Multiple replicas for HA
-  allocationStrategy: consistent-hashing
-```
-
-## Migration Guide
-
-### From Prometheus Operator
-
-If migrating from Prometheus Operator:
-
-1. Keep existing ServiceMonitors/PodMonitors
-2. Enable target allocator in IDOT
-3. Scale IDOT collectors to match Prometheus instances
-4. Gradually reduce Prometheus Operator scrape load
-5. Monitor metrics continuity in Instana
-
-### From Static Prometheus Configuration
-
-1. Convert static scrape configs to ServiceMonitors
-2. Deploy ServiceMonitors to cluster
-3. Enable target allocator
-4. Verify metrics collection
-5. Remove static configurations
 
 ## References
 
+- [Prometheus Receiver Documentation](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)
 - [OpenTelemetry Collector Documentation](https://opentelemetry.io/docs/collector/)
 - [Target Allocator Design](https://github.com/open-telemetry/opentelemetry-operator/blob/main/cmd/otel-allocator/README.md)
-- [Prometheus Receiver Documentation](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)
-- [Instana OpenTelemetry Documentation](https://www.ibm.com/docs/en/instana-observability/current?topic=apis-opentelemetry)
-

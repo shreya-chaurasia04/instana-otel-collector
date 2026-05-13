@@ -1,238 +1,73 @@
-# Example: Target Allocator with Consistent Hashing Strategy
-# This file demonstrates how to configure IDOT with target allocator for
-# horizontally scaling Prometheus metric collection across multiple collectors.
+# Example overlay for enabling Prometheus scraping with Target Allocator
+#
+# This file is intentionally additive. It is not a copy of the chart's full
+# values.yaml, which helps avoid configuration drift over time.
+#
+# Usage:
+#   helm install instana-otel-collector \
+#     --repo https://instana.github.io/instana-otel-collector instana-otel-collector-chart \
+#     --namespace instana-collector \
+#     --create-namespace \
+#     -f examples/target-allocator-example.yaml
+#
+# Start from the chart's default values.yaml and add only the target allocator-
+# specific configuration shown below.
 
-# ==============================================================================
-# BASIC CONFIGURATION
-# ==============================================================================
-
-clusterName: my-production-cluster
-instanaEndpoint: ingress-red-saas.instana.io:443
-instanaKey: YOUR_INSTANA_KEY_HERE
-
-# ==============================================================================
-# TARGET ALLOCATOR CONFIGURATION
-# ==============================================================================
-
-targetAllocator:
-  # Enable the target allocator component
-  enabled: true
-  
-  # Container image for target allocator
-  image:
-    repository: ghcr.io/open-telemetry/opentelemetry-operator/target-allocator
-    tag: 0.95.0
-    pullPolicy: IfNotPresent
-  
-  # Number of target allocator replicas (1 is sufficient for most use cases)
-  replicas: 1
-  
-  # Allocation strategy - consistent-hashing provides:
-  # - Even distribution of targets across collectors
-  # - Minimal reassignment when scaling collectors
-  # - Stable target-to-collector mapping
-  allocationStrategy: consistent-hashing
-  
-  # Service configuration
-  service:
-    type: ClusterIP
-    port: 80
-  
-  # Prometheus Custom Resource (CR) configuration
-  prometheusCR:
-    # Enable discovery of ServiceMonitors and PodMonitors
-    enabled: true
-    
-    # ServiceMonitor selector - filter which ServiceMonitors to use
-    # Empty selector {} means all ServiceMonitors in the cluster
-    serviceMonitorSelector: {}
-    # Example with label selector:
-    # serviceMonitorSelector:
-    #   matchLabels:
-    #     monitoring: enabled
-    #     team: platform
-    
-    # PodMonitor selector - filter which PodMonitors to use
-    podMonitorSelector: {}
-    # Example with expression selector:
-    # podMonitorSelector:
-    #   matchExpressions:
-    #   - key: environment
-    #     operator: In
-    #     values: [production, staging]
-  
-  # Resource limits and requests
-  resources:
-    limits:
-      cpu: 200m
-      memory: 256Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
-
-# ==============================================================================
-# DAEMONSET COLLECTOR CONFIGURATION
-# ==============================================================================
-# Keep the DaemonSet focused on node-local collection. This example does not
-# attach target allocator to the DaemonSet. Target allocator is shown only with
-# the StatefulSet below, which is the scalable centralized scraping tier.
-
-daemonset:
-  # Run as DaemonSet (one pod per node)
-  mode: daemonset
-  
-  # Collector image
-  image:
-    repository: icr.io/instana/idot
-    tag: latest
-  
-  # Enable standard presets for node-local telemetry
-  presets:
-    kubernetesAttributes:
-      enabled: true
-      extractAllPodLabels: true
-      extractAllPodAnnotations: true
-    kubeletMetrics:
-      enabled: true
-    hostMetrics:
-      enabled: true
-    logsCollection:
-      enabled: false
-
-# ==============================================================================
-# STATEFULSET COLLECTOR CONFIGURATION
-# ==============================================================================
-
+# Configure Prometheus scraping on the StatefulSet collector tier.
+# The DaemonSet should remain focused on node-local collection such as
+# hostmetrics and kubeletstats.
 statefulset:
-  # Run as StatefulSet for cluster-level metrics and Prometheus scraping
-  mode: statefulset
-  
-  # Scale to multiple replicas to distribute Prometheus scraping
-  replicaCount: 3  # Increase for more scraping capacity
-  
-  image:
-    repository: icr.io/instana/idot
-    tag: latest
-  
-  presets:
-    kubernetesAttributes:
-      enabled: true
-    kubernetesEvents:
-      enabled: true
-    clusterMetrics:
-      enabled: true
-  
+  replicaCount: 3
+
   config:
     receivers:
-      # Prometheus receiver with target allocator
       prometheus:
         config:
           global:
             scrape_interval: 30s
             scrape_timeout: 10s
+        # Example only:
+        # Replace <target-allocator-service-name> with the actual Kubernetes
+        # Service DNS name exposed by your target allocator deployment.
         target_allocator:
-          endpoint: http://idot-targetallocator:80
+          endpoint: http://<target-allocator-service-name>:80
           interval: 30s
-          collector_id: ${POD_NAME}
-      
-      otlp:
-        protocols:
-          grpc:
-            endpoint: ${env:MY_POD_IP}:4317
-          http:
-            endpoint: ${env:MY_POD_IP}:4318
-      
-      k8s_cluster:
-        auth_type: serviceAccount
-        node_conditions_to_report: [Ready, MemoryPressure, DiskPressure]
-        allocatable_types_to_report: [cpu, memory, storage]
-    
-    processors:
-      memory_limiter:
-        check_interval: 1s
-        limit_percentage: 50
-        spike_limit_percentage: 10
-      
-      k8sattributes:
-        auth_type: 'serviceAccount'
-        extract:
-          metadata:
-            - k8s.namespace.name
-            - k8s.deployment.name
-            - k8s.pod.name
-            - k8s.cluster.uid
-      
-      resourcedetection/env:
-        detectors:
-          - env
-      
-      batch: {}
-    
-    exporters:
-      otlp/instana:
-        endpoint: '${env:INSTANA_ENDPOINT}'
-        tls:
-          insecure: false
-        headers:
-          x-instana-key: '${env:INSTANA_KEY}'
-          x-instana-host: '${env:HOSTNAME:-hostname}'
-    
+          collector_id: ${env:HOSTNAME}
+
     service:
       pipelines:
         metrics:
           receivers:
-          - otlp
-          - k8s_cluster
-          - prometheus  # Include Prometheus receiver
-          exporters:
-          - otlp/instana
-          processors:
-          - resourcedetection/env
-          - k8sattributes
-          - memory_limiter
-          - batch
+            - otlp
+            - k8s_cluster
+            - prometheus
 
-# ==============================================================================
-# EXAMPLE SERVICEMONITOR
-# ==============================================================================
-# Create this separately to scrape your application metrics:
+# Example discovery selectors for environments using ServiceMonitor/PodMonitor
+# resources. These are examples only and are not currently wired as chart-backed
+# values in the non-operator IDOT chart.
+#
+# targetAllocator:
+#   enabled: true
+#   prometheusCR:
+#     enabled: true
+#     serviceMonitorSelector:
+#       matchLabels:
+#         monitoring: enabled
+#     podMonitorSelector: {}
+#
+# Example ServiceMonitor for validation:
 #
 # apiVersion: monitoring.coreos.com/v1
 # kind: ServiceMonitor
 # metadata:
 #   name: my-app-metrics
 #   namespace: default
-#   labels:
-#     monitoring: enabled
 # spec:
 #   selector:
 #     matchLabels:
 #       app: my-application
 #   endpoints:
-#   - port: metrics
-#     interval: 30s
-#     path: /metrics
+#     - port: metrics
+#       path: /metrics
+#       interval: 30s
 
-# ==============================================================================
-# INSTALLATION COMMANDS
-# ==============================================================================
-# 
-# Install with this configuration:
-# 
-# helm install instana-otel-collector \
-#   --repo https://instana.github.io/instana-otel-collector instana-otel-collector-chart \
-#   --namespace instana-collector \
-#   --create-namespace \
-#   -f target-allocator-example.yaml
-#
-# Verify installation:
-#
-# kubectl get pods -n instana-collector
-# kubectl logs -l app.kubernetes.io/component=target-allocator -n instana-collector
-#
-# Check target allocation:
-#
-# kubectl port-forward svc/idot-targetallocator 8080:80 -n instana-collector
-# curl http://localhost:8080/jobs
-
-# Made with Bob
